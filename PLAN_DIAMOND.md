@@ -156,11 +156,15 @@ Rule: **a path earns a long life only while it stays specular.**
   refraction vs finite-difference of neighbor rays.
 - **Spike C — deposit/gather**: a finite-radiance caustic on a plane vs a
   brute-force (very noisy) path-traced reference.
-- **Architecture fork — Mitsuba fit**: Mitsuba does not expose ray differentials
-  through its high-level integrators. We will likely implement the
-  beam-differential tracer as a **custom Python integrator on top of
-  `scene.ray_intersect()`**, or roll a **minimal standalone tracer** for
-  flat-faceted gems. Decide early; this shapes everything.
+- **Architecture — DECIDED (staged B→A).** Mitsuba does not expose ray
+  differentials through its integrators, and flat-faceted gems make
+  intersection trivial, so Mitsuba's BVH/material value-add mostly evaporates.
+  Plan: **(Stage 1)** build a **standalone plain-Python/NumPy tracer** for a
+  single flat-faceted gem — maximize clarity and finite-difference
+  validation of the novel differential math; **(Stage 2)** port the validated
+  kernel to **Mitsuba-as-library + Dr.Jit** (CPU+GPU) when scaling to the RTX
+  box. Throughout, use **Mitsuba's spectral path tracer as a brute-force
+  reference oracle** (reuses the spectral variant + `variants.py`).
 
 ---
 
@@ -188,13 +192,19 @@ Rule: **a path earns a long life only while it stays specular.**
 
 ## Immediate next actions
 
-- [ ] **Architecture fork**: build on Mitsuba `ray_intersect` vs minimal custom
-      tracer.
-- [ ] M0/M1: spectral variant health + prism rainbow.
-- [ ] Draft the beam-differential **state + propagation equations**; set up the
-      M2 finite-difference check.
-- [ ] **Literature check** (this turn): position against SMS / MNEE / photon
-      beams / ray differentials / spectral caustics.
+- [x] Literature check — see [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md).
+- [x] Architecture decided — staged B→A standalone-first (see Spikes & risks).
+- [ ] **Stage-1 scaffolding**: `src/diffrt/diamond/` with `optics.py` (Snell /
+      Fresnel / TIR / `n(λ)`) and `geometry.py` (flat-facet planes; start with a
+      triangular **prism**, then a brilliant cut).
+- [ ] **M1 — prism rainbow**: per-wavelength center-ray refraction onto a screen;
+      visible spectrum (validates the optics, no differentials yet).
+- [ ] **M2 — differential check (Spike B, riskiest)**: analytic
+      `∂(pos,dir)/∂(θ,φ,λ)` vs finite differences of neighbor rays through one
+      refraction.
+- [ ] **M3 — caustic on a plane** via footprint splatting vs a brute-force
+      Mitsuba spectral reference (the oracle).
+- [ ] **M4 — diamond, first fire**.
 
 ---
 
