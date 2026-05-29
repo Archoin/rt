@@ -194,16 +194,15 @@ Rule: **a path earns a long life only while it stays specular.**
 
 - [x] Literature check — see [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md).
 - [x] Architecture decided — staged B→A standalone-first (see Spikes & risks).
-- [ ] **Stage-1 scaffolding**: `src/diffrt/diamond/` with `optics.py` (Snell /
-      Fresnel / TIR / `n(λ)`) and `geometry.py` (flat-facet planes; start with a
-      triangular **prism**, then a brilliant cut).
-- [ ] **M1 — prism rainbow**: per-wavelength center-ray refraction onto a screen;
-      visible spectrum (validates the optics, no differentials yet).
-- [ ] **M2 — differential check (Spike B, riskiest)**: analytic
-      `∂(pos,dir)/∂(θ,φ,λ)` vs finite differences of neighbor rays through one
-      refraction.
-- [ ] **M3 — caustic on a plane** via footprint splatting vs a brute-force
-      Mitsuba spectral reference (the oracle).
+- [x] **Stage-1 scaffolding**: `src/diffrt/diamond/` — `optics.py`,
+      `geometry.py`, `trace.py`, `differentials.py`.
+- [x] **M1 — prism rainbow**: clean dispersion; center deviation matches analytic
+      minimum deviation. (`scripts/prism_rainbow.py`)
+- [x] **M2 — differential check (Spike B, riskiest)**: analytic
+      `∂(exit dir, landing)/∂(θ,φ,λ)` vs finite differences — worst rel. err
+      7e-8, incl. the `∂/∂λ` dispersion column. (`scripts/diff_fd_check.py`)
+- [ ] **M3 — caustic on a plane** via footprint splatting; validate vs a dense
+      brute-force histogram (reference choice — see report).
 - [ ] **M4 — diamond, first fire**.
 
 ---

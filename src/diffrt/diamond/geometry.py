@@ -114,6 +114,36 @@ def triangular_prism(side: float = 2.0, depth: float = 2.0,
     ])
 
 
+def round_brilliant(girdle_r: float = 1.0, crown_angle_deg: float = 34.0,
+                    pavilion_angle_deg: float = 41.0, table_frac: float = 0.55,
+                    n_sides: int = 8) -> Gem:
+    """A faceted round-brilliant-style gem (table-up), built as a convex hull.
+
+    Vertices: an ``n_sides`` girdle polygon at y=0, a scaled table polygon above
+    it (a pyramidal frustum, so crown panels are planar), and a single culet
+    point below. ``ConvexHull`` provides outward facet normals directly. Crown
+    and pavilion angles are set via the table size and culet depth.
+    """
+    from scipy.spatial import ConvexHull
+
+    R = girdle_r
+    r_t = table_frac * R
+    crown_h = (R - r_t) * np.tan(np.radians(crown_angle_deg))
+    pav_h = R * np.tan(np.radians(pavilion_angle_deg))
+
+    ang = 2.0 * np.pi * np.arange(n_sides) / n_sides
+    girdle = np.column_stack([R * np.cos(ang), np.zeros(n_sides), R * np.sin(ang)])
+    table = np.column_stack([r_t * np.cos(ang), np.full(n_sides, crown_h),
+                             r_t * np.sin(ang)])
+    culet = np.array([[0.0, -pav_h, 0.0]])
+    pts = np.vstack([girdle, table, culet])
+
+    hull = ConvexHull(pts)
+    facets = [Facet(pts[s], normal=eq[:3])           # outward normal from hull
+              for s, eq in zip(hull.simplices, hull.equations)]
+    return Gem(facets)
+
+
 def intersect_plane(o, d, p0, n):
     """Ray/plane intersection distance, or None if parallel/behind."""
     denom = float(np.dot(n, d))
@@ -123,4 +153,5 @@ def intersect_plane(o, d, p0, n):
     return t if t > EPS else None
 
 
-__all__ = ["Facet", "Gem", "triangular_prism", "intersect_plane", "EPS"]
+__all__ = ["Facet", "Gem", "triangular_prism", "round_brilliant",
+           "intersect_plane", "EPS"]
