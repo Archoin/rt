@@ -89,9 +89,12 @@ def _nearest_hit(facets, o, d):
     return best_t, best_n, found
 
 
-def trace_image_wavelength(gem, o0, d0, n_glass, env_fn, max_bounces=12,
+def trace_image_wavelength(gem, o0, d0, n_glass, light_fn, max_bounces=12,
                            n_outside=1.0):
-    """Radiance per ray for one wavelength (scalar index ``n_glass``)."""
+    """Radiance per ray for one wavelength (scalar index ``n_glass``).
+
+    ``light_fn(o, d)`` returns the radiance a terminal ray ``(o, d)`` receives.
+    """
     M = o0.shape[0]
     rad = np.zeros(M)
     o = o0.copy()
@@ -106,8 +109,8 @@ def trace_image_wavelength(gem, o0, d0, n_glass, env_fn, max_bounces=12,
         t, nrm, found = _nearest_hit(facets, oo, dd)
 
         miss = ~found
-        if miss.any():                                   # left the gem
-            rad[active[miss]] = env_fn(dd[miss])
+        if miss.any():                                   # left the gem → light
+            rad[active[miss]] = light_fn(oo[miss], dd[miss])
 
         hit = found
         if not hit.any():
@@ -132,12 +135,12 @@ def trace_image_wavelength(gem, o0, d0, n_glass, env_fn, max_bounces=12,
         d[ah] = new_d
         active = ah                                      # hit rays continue
 
-    if active.size:                                      # bounce cap → env
-        rad[active] = env_fn(d[active])
+    if active.size:                                      # bounce cap → light
+        rad[active] = light_fn(o[active], d[active])
     return rad
 
 
-def trace_image_wavelength_split(gem, o0, d0, n_glass, env_fn, max_bounces=16,
+def trace_image_wavelength_split(gem, o0, d0, n_glass, light_fn, max_bounces=16,
                                  n_outside=1.0, weight_thresh=0.004):
     """Radiance per pixel for one wavelength with full Fresnel splitting.
 
@@ -160,8 +163,8 @@ def trace_image_wavelength_split(gem, o0, d0, n_glass, env_fn, max_bounces=16,
         t, nrm, found = _nearest_hit(facets, o, d)
 
         miss = ~found
-        if miss.any():                                   # left the gem → env
-            np.add.at(rad, pix[miss], w[miss] * env_fn(d[miss]))
+        if miss.any():                                   # left the gem → light
+            np.add.at(rad, pix[miss], w[miss] * light_fn(o[miss], d[miss]))
 
         hit = found
         if not hit.any():
@@ -198,12 +201,12 @@ def trace_image_wavelength_split(gem, o0, d0, n_glass, env_fn, max_bounces=16,
         w = np.concatenate([wr[keep_r], wt[keep_t]])
         pix = np.concatenate([ph[keep_r], ph[keep_t]])
 
-    if o.shape[0]:                                       # survivors → env
-        np.add.at(rad, pix, w * env_fn(d))
+    if o.shape[0]:                                       # survivors → light
+        np.add.at(rad, pix, w * light_fn(o, d))
     return rad
 
 
-def render_spectral(gem, camera, env_fn, n_of_lambda, wavelengths_nm,
+def render_spectral(gem, camera, light_fn, n_of_lambda, wavelengths_nm,
                     width, height, max_bounces=12):
     """Render an (H, W, 3) linear-RGB image by spectral accumulation."""
     o, d, (H, W) = make_camera_rays(*camera, width, height)
@@ -211,7 +214,7 @@ def render_spectral(gem, camera, env_fn, n_of_lambda, wavelengths_nm,
     rgb_norm = np.zeros(3)
     for nm in wavelengths_nm:
         n_glass = float(n_of_lambda(nm / 1000.0))
-        rad = trace_image_wavelength_split(gem, o, d, n_glass, env_fn, max_bounces)
+        rad = trace_image_wavelength_split(gem, o, d, n_glass, light_fn, max_bounces)
         w = np.array(wavelength_to_rgb(nm))
         img += rad[:, None] * w[None, :]
         rgb_norm += w
