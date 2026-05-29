@@ -56,10 +56,10 @@ def sellmeier_dn_dlambda(wavelength_um, material: str = "BK7"):
     This is the term that fans the spectrum into "fire": ∂dir/∂λ ∝ dn/dλ.
     """
     B, C = SELLMEIER[material]
-    lam = float(wavelength_um)
+    lam = np.asarray(wavelength_um, dtype=float)        # scalar or array
     l2 = lam * lam
     dn2 = sum(Bi * (-2.0 * lam * Ci) / (l2 - Ci) ** 2 for Bi, Ci in zip(B, C))
-    n = float(sellmeier_n(lam, material))
+    n = sellmeier_n(lam, material)
     return dn2 / (2.0 * n)
 
 
