@@ -137,6 +137,72 @@ def trace_image_wavelength(gem, o0, d0, n_glass, env_fn, max_bounces=12,
     return rad
 
 
+def trace_image_wavelength_split(gem, o0, d0, n_glass, env_fn, max_bounces=16,
+                                 n_outside=1.0, weight_thresh=0.004):
+    """Radiance per pixel for one wavelength with full Fresnel splitting.
+
+    At each dielectric interface the ray splits into a **reflected** and a
+    **transmitted** child, weighted by the Fresnel reflectance R — a pure
+    specular dielectric (perfect reflection + refraction, no diffuse/glossy
+    lobe). Total internal reflection is the R=1 case. Children whose throughput
+    falls below ``weight_thresh`` are pruned, bounding the ray tree.
+    """
+    M = o0.shape[0]
+    rad = np.zeros(M)
+    o, d = o0.copy(), d0.copy()
+    w = np.ones(M)                                       # path throughput
+    pix = np.arange(M)
+    facets = gem.facets
+
+    for _ in range(max_bounces):
+        if o.shape[0] == 0:
+            break
+        t, nrm, found = _nearest_hit(facets, o, d)
+
+        miss = ~found
+        if miss.any():                                   # left the gem → env
+            np.add.at(rad, pix[miss], w[miss] * env_fn(d[miss]))
+
+        hit = found
+        if not hit.any():
+            break
+        oh, dh, nh = o[hit], d[hit], nrm[hit]
+        th, wh, ph = t[hit], w[hit], pix[hit]
+        hp = oh + th[:, None] * dh
+
+        entering = np.sum(dh * nh, axis=1) < 0.0
+        n_face = np.where(entering[:, None], nh, -nh)
+        eta = np.where(entering, n_outside / n_glass, n_glass / n_outside)
+        cos_i = -np.sum(dh * n_face, axis=1)
+        sin2_t = eta * eta * (1 - cos_i * cos_i)
+        tir = sin2_t >= 1.0
+        cos_t = np.sqrt(np.clip(1 - sin2_t, 0.0, None))
+
+        rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t)
+        rp = (eta * cos_t - cos_i) / (eta * cos_t + cos_i)
+        R = np.where(tir, 1.0, 0.5 * (rs * rs + rp * rp))   # Fresnel reflectance
+
+        refl = dh + 2 * cos_i[:, None] * n_face
+        refl /= np.linalg.norm(refl, axis=1, keepdims=True)
+        refr = eta[:, None] * dh + (eta * cos_i - cos_t)[:, None] * n_face
+        refr /= np.maximum(np.linalg.norm(refr, axis=1, keepdims=True), 1e-12)
+
+        wr = wh * R
+        keep_r = wr > weight_thresh                      # reflected children
+        wt = wh * (1.0 - R)
+        keep_t = (~tir) & (wt > weight_thresh)           # transmitted children
+
+        o = np.concatenate([hp[keep_r] + _NUDGE * refl[keep_r],
+                            hp[keep_t] + _NUDGE * refr[keep_t]])
+        d = np.concatenate([refl[keep_r], refr[keep_t]])
+        w = np.concatenate([wr[keep_r], wt[keep_t]])
+        pix = np.concatenate([ph[keep_r], ph[keep_t]])
+
+    if o.shape[0]:                                       # survivors → env
+        np.add.at(rad, pix, w * env_fn(d))
+    return rad
+
+
 def render_spectral(gem, camera, env_fn, n_of_lambda, wavelengths_nm,
                     width, height, max_bounces=12):
     """Render an (H, W, 3) linear-RGB image by spectral accumulation."""
@@ -145,7 +211,7 @@ def render_spectral(gem, camera, env_fn, n_of_lambda, wavelengths_nm,
     rgb_norm = np.zeros(3)
     for nm in wavelengths_nm:
         n_glass = float(n_of_lambda(nm / 1000.0))
-        rad = trace_image_wavelength(gem, o, d, n_glass, env_fn, max_bounces)
+        rad = trace_image_wavelength_split(gem, o, d, n_glass, env_fn, max_bounces)
         w = np.array(wavelength_to_rgb(nm))
         img += rad[:, None] * w[None, :]
         rgb_norm += w
@@ -154,4 +220,4 @@ def render_spectral(gem, camera, env_fn, n_of_lambda, wavelengths_nm,
 
 
 __all__ = ["wavelength_to_rgb", "make_camera_rays", "render_spectral",
-           "trace_image_wavelength"]
+           "trace_image_wavelength", "trace_image_wavelength_split"]

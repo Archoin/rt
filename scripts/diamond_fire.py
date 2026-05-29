@@ -30,10 +30,10 @@ MAX_BOUNCES = 16
 EXPOSURE = 2.2
 
 CAMERA = (
-    (0.0, 1.62, 2.85),     # eye, front-above
-    (0.0, -0.12, 0.0),     # look-at (toward the stone)
+    (0.0, 2.05, 3.85),     # eye, front-above (pulled back for margin)
+    (0.0, -0.10, 0.0),     # look-at (toward the stone)
     (0.0, 1.0, 0.0),       # up
-    33.0,                  # vertical fov (deg)
+    30.0,                  # vertical fov (deg)
 )
 
 
