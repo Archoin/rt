@@ -48,6 +48,21 @@ def cauchy_n(wavelength_um, A: float, B: float):
     return A + B / (lam * lam)
 
 
+def sellmeier_dn_dlambda(wavelength_um, material: str = "BK7"):
+    """Analytic dispersion derivative ``dn/dλ`` (per µm) for a Sellmeier model.
+
+    From ``n² = 1 + Σ Bᵢ λ²/(λ²−Cᵢ)``:
+        d(n²)/dλ = Σ Bᵢ · (−2 λ Cᵢ)/(λ²−Cᵢ)²,   dn/dλ = d(n²)/dλ / (2n).
+    This is the term that fans the spectrum into "fire": ∂dir/∂λ ∝ dn/dλ.
+    """
+    B, C = SELLMEIER[material]
+    lam = float(wavelength_um)
+    l2 = lam * lam
+    dn2 = sum(Bi * (-2.0 * lam * Ci) / (l2 - Ci) ** 2 for Bi, Ci in zip(B, C))
+    n = float(sellmeier_n(lam, material))
+    return dn2 / (2.0 * n)
+
+
 # --- reflection / refraction ----------------------------------------------
 
 def normalize(v):
@@ -96,6 +111,6 @@ def fresnel_dielectric(cos_i, eta):
 
 
 __all__ = [
-    "SELLMEIER", "sellmeier_n", "cauchy_n",
+    "SELLMEIER", "sellmeier_n", "sellmeier_dn_dlambda", "cauchy_n",
     "normalize", "reflect", "refract", "fresnel_dielectric",
 ]
