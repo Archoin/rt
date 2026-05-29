@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffrt"
+version = "0.0.1"
+description = "Differentiable ray tracing research scaffolding around Mitsuba 3"
+requires-python = ">=3.10"
+dependencies = [
+  "mitsuba>=3.5",
+  "drjit>=1.0",
+  "numpy",
+  "matplotlib",
+  "imageio",
+  "tqdm",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

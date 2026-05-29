@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+
+# Rendering outputs / data (large, reproducible)
+runs/
+data/
+*.exr
+*.hdr
+
+# OS
+.DS_Store
