@@ -22,7 +22,10 @@ import matplotlib.image as mpimg
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from diffrt.diamond.fixedseq import solve_fixed_2dof, trace_record_sequence
+import argparse
+
+from diffrt.diamond.fixedseq import (solve_fixed_2dof, solve_fixed_3dof,
+                                     trace_record_sequence)
 from diffrt.diamond.geometry import round_brilliant
 from diffrt.diamond.optics import sellmeier_dn_dlambda, sellmeier_n
 from diffrt.diamond.render_photon import (_camera_projector, _sample_cone,
@@ -48,6 +51,12 @@ def wl_to_rgb(nm):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--solver", choices=["2dof", "3dof"], default="3dof")
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+    solver = solve_fixed_3dof if args.solver == "3dof" else solve_fixed_2dof
+
     gem = round_brilliant(crown_angle_deg=34.0, pavilion_angle_deg=41.0, table_frac=0.55)
     facets = gem.facets
     n_of = lambda um: sellmeier_n(um, "diamond")
@@ -81,8 +90,8 @@ def main() -> int:
         idxs = np.array(idxs)
         Ln = key[0]
         seq = list(zip(key[1:1 + Ln], key[1 + Ln:1 + 2 * Ln]))
-        res = solve_fixed_2dof(facets, seq, L, dirs[idxs], wl[idxs], n_of, dn_of,
-                               C, max_iter=MAX_ITER, tol=TOL)
+        res = solver(facets, seq, L, dirs[idxs], wl[idxs], n_of, dn_of,
+                     C, max_iter=MAX_ITER, tol=TOL)
         conv = res["converged"]
         if not conv.any():
             continue
@@ -98,10 +107,12 @@ def main() -> int:
     for c in range(3):
         img[:, :, c] = gaussian_filter(img[:, :, c], BLUR)
     srgb = np.clip(img * (EXPOSURE / max(img.max(), 1e-12)), 0, 1) ** (1 / 2.2)
-    out = pathlib.Path(__file__).resolve().parent.parent / "runs" / "diamond_fire_fixed.png"
-    out.parent.mkdir(exist_ok=True)
+    rundir = pathlib.Path(__file__).resolve().parent.parent / "runs"
+    rundir.mkdir(exist_ok=True)
+    out = rundir / (args.out or f"diamond_fire_fixed_{args.solver}.png")
     mpimg.imsave(str(out), srgb)
 
+    print(f"solver: {args.solver} (weighted)")
     print(f"samples {N_SAMPLES:,}, exited {int(exited.sum()):,}, "
           f"distinct chains {len(chains):,}")
     print(f"solved {used} chains (>= {MIN_RAYS} rays); connections splatted: {n_conn:,}")

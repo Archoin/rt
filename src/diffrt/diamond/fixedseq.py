@@ -235,9 +235,77 @@ def solve_fixed_2dof(facets, seq, origin, dirs, wl, n_of, dn_of, target,
         if (dist < tol).all():
             break
 
-    return {"converged": dist < tol, "P": r["P"], "D": r["D"],
+    return {"converged": dist < tol, "P": r["P"], "D": r["D"], "emit": D,
+            "wl": wl, "resid": dist}
+
+
+def solve_fixed_3dof(facets, seq, origin, dirs, wl0, n_of, dn_of, target,
+                     max_iter=30, tol=1e-9, band=(0.40, 0.70),
+                     fracs=(1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125)):
+    """3-DOF connection on a fixed chain: tune (e1, e2, wl) jointly, with **proper
+    DOF weighting** + line search.
+
+    Weighting: the three DOFs have incommensurate units (radians for e1,e2; µm for
+    wl), so the raw min-norm step is unit-dependent. We equilibrate per ray —
+    scale each Jacobian column to unit norm, take the min-norm step in that scaled
+    space, then unscale — which is scale-invariant and lets wl move at the right
+    physical magnitude (≈ weighting wl by 1/‖∂f/∂wl‖).
+
+    Returns dict: converged (N,), P, D (N,3), wl (N,), resid (N,)."""
+    N = dirs.shape[0]
+    D = (dirs / np.linalg.norm(dirs, axis=1, keepdims=True)).copy()
+    wl = np.broadcast_to(wl0, (N,)).astype(float).copy()
+    target = np.asarray(target, float)
+    O = np.broadcast_to(np.asarray(origin, float), (N, 3)).copy()
+
+    def trace(Dx, wlx):
+        return trace_fixed_sequence_vec(facets, seq, O, Dx, wlx, n_of, dn_of)
+
+    def resid(r):
+        TP = target[None, :] - r["P"]
+        f = np.cross(TP, r["D"])
+        return TP, f, np.linalg.norm(f, axis=1)
+
+    r = trace(D, wl)
+    TP, f, dist = resid(r)
+    for _ in range(max_iter):
+        Jf = np.empty((N, 3, 3))
+        for k in range(3):
+            Jf[:, :, k] = -np.cross(r["Pj"][:, :, k], r["D"]) + np.cross(TP, r["Dj"][:, :, k])
+        cn = np.linalg.norm(Jf, axis=1)                  # (N,3) column norms
+        cn = np.where(cn < 1e-12, 1.0, cn)
+        Jf_s = Jf / cn[:, None, :]                       # unit-norm columns
+        delta_s = -np.einsum('nij,nj->ni', np.linalg.pinv(Jf_s), f)
+        delta = np.nan_to_num(delta_s / cn)              # unscale → (de1,de2,dwl)
+
+        e1, e2 = _make_frames(D)
+        ang = delta[:, 0:1] * e1 + delta[:, 1:2] * e2
+        dwl = delta[:, 2]
+        best_dist = dist.copy()
+        best_frac = np.zeros(N)
+        for fr in fracs:
+            Dp = D + fr * ang
+            Dp /= np.linalg.norm(Dp, axis=1, keepdims=True)
+            wlp = np.clip(wl + fr * dwl, band[0], band[1])
+            _, _, dp = resid(trace(Dp, wlp))
+            better = dp < best_dist
+            best_dist = np.where(better, dp, best_dist)
+            best_frac = np.where(better, fr, best_frac)
+        if not (best_frac > 0).any():
+            break
+        moved = best_frac > 0
+        Dn = D + best_frac[:, None] * ang
+        Dn /= np.linalg.norm(Dn, axis=1, keepdims=True)
+        D = np.where(moved[:, None], Dn, D)
+        wl = np.where(moved, np.clip(wl + best_frac * dwl, band[0], band[1]), wl)
+        r = trace(D, wl)
+        TP, f, dist = resid(r)
+        if (dist < tol).all():
+            break
+
+    return {"converged": dist < tol, "P": r["P"], "D": r["D"], "emit": D,
             "wl": wl, "resid": dist}
 
 
 __all__ = ["trace_record_sequence", "trace_fixed_sequence_vec",
-           "connect_fixed_newton", "solve_fixed_2dof"]
+           "connect_fixed_newton", "solve_fixed_2dof", "solve_fixed_3dof"]
