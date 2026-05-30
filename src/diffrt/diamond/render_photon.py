@@ -33,13 +33,14 @@ def _make_frames(D):
 
 
 def _nearest_hit_vec(facets, O, D):
-    """Nearest triangle hit per ray. Returns (t, normal, p0_on_plane, found)."""
+    """Nearest triangle hit per ray. Returns (t, normal, p0, found, facet_idx)."""
     K = O.shape[0]
     best_t = np.full(K, np.inf)
     best_n = np.zeros((K, 3))
     best_p0 = np.zeros((K, 3))
+    best_fi = np.full(K, -1, dtype=int)
     found = np.zeros(K, dtype=bool)
-    for f in facets:
+    for fi, f in enumerate(facets):
         n = f.n
         v0, v1, v2 = f.v[0], f.v[1], f.v[2]
         denom = D @ n
@@ -55,8 +56,9 @@ def _nearest_hit_vec(facets, O, D):
         best_t = np.where(valid, t, best_t)
         best_n = np.where(valid[:, None], n, best_n)
         best_p0 = np.where(valid[:, None], v0, best_p0)
+        best_fi = np.where(valid, fi, best_fi)
         found |= valid
-    return best_t, best_n, best_p0, found
+    return best_t, best_n, best_p0, found, best_fi
 
 
 def trace_beams_vec(gem, O, D0, n_glass, dn, n_outside=1.0, max_bounces=18):
@@ -89,7 +91,7 @@ def trace_beams_vec(gem, O, D0, n_glass, dn, n_outside=1.0, max_bounces=18):
             break
         Pa, Da = P[alive], D[alive]
         Pja, Dja = Pj[alive], Dj[alive]
-        t, nrm, p0, found = _nearest_hit_vec(facets, Pa, Da)
+        t, nrm, p0, found, _fi = _nearest_hit_vec(facets, Pa, Da)
 
         miss = ~found
         if miss.any():
@@ -179,7 +181,7 @@ def trace_rays_vec(gem, O, D0, n_glass, n_outside=1.0, max_bounces=18):
         if alive.size == 0:
             break
         Pa, Da = P[alive], D[alive]
-        t, nrm, _p0, found = _nearest_hit_vec(facets, Pa, Da)
+        t, nrm, _p0, found, _fi = _nearest_hit_vec(facets, Pa, Da)
         miss = ~found
         if miss.any():
             am = alive[miss]
