@@ -66,6 +66,78 @@ def sample_pass(gem, light_pos, camera_C, n_of, n_samples, band,
             "n_refr": res["n_refr"], "n_refl": res["n_refl"]}
 
 
+def _keep_best_per_bin(keep, cand, per_bin):
+    """Merge candidate samples into the reservoir, retaining the ``per_bin``
+    smallest-distance samples in each film bin. Vectorized grouped top-M."""
+    comb = cand if keep is None else {k: np.concatenate([keep[k], cand[k]])
+                                      for k in cand}
+    order = np.lexsort((comb["dist"], comb["bin"]))   # by bin, then dist asc
+    sb = comb["bin"][order]
+    change = np.ones(sb.shape[0], dtype=bool)
+    change[1:] = sb[1:] != sb[:-1]
+    first = np.maximum.accumulate(np.where(change, np.arange(sb.shape[0]), 0))
+    rank = np.arange(sb.shape[0]) - first              # within-bin rank (0-based)
+    sel = order[rank < per_bin]
+    return {k: comb[k][sel] for k in comb}
+
+
+def sample_pass_streaming(gem, light_pos, camera, n_of, total_samples,
+                          batch_size=1_000_000, band=(0.40, 0.70), gem_radius=1.3,
+                          max_bounces=18, film_bins=(96, 96), per_bin=64, seed=0):
+    """Stream ``total_samples`` light rays in batches, keeping only the
+    ``per_bin`` closest-to-camera samples per coarse FILM bin.
+
+    Memory is bounded (~ film_bins * per_bin kept samples + one batch), so
+    ``total_samples`` is compute-bound, not memory-bound. Stratifying by film bin
+    keeps every glint region represented as sampling grows (each glint images to
+    its own bins), instead of a global top-N collapsing onto the nearest glint.
+
+    NOTE: film-bin stratification is a cheap diversity proxy. A more precise
+    alternative is to stratify by FACET-CHAIN — record each ray's chain with
+    ``fixedseq.trace_record_sequence`` and keep best-M per chain (exact
+    per-channel coverage, but it records the chain per ray, so it's heavier).
+    To switch, replace the ``bin`` key below with a per-ray chain hash.
+
+    Returns the same dict format as ``sample_pass`` (for the kept samples).
+    """
+    from diffrt.diamond.render_photon import trace_rays_vec
+
+    rng = np.random.default_rng(seed)
+    L = np.asarray(light_pos, float)
+    C = np.asarray(camera[0], float)
+    bnx, bny = film_bins
+    _, project = _camera_projector(camera, bnx, bny)
+    axis = -L
+    cone_half = np.arctan(gem_radius / np.linalg.norm(L))
+
+    keep = None
+    done = 0
+    while done < total_samples:
+        B = min(batch_size, total_samples - done)
+        done += B
+        dirs = _sample_cone(axis, cone_half, B, rng)
+        wl = rng.uniform(band[0], band[1], B)
+        O = np.broadcast_to(L, dirs.shape).copy()
+        res = trace_rays_vec(gem, O, dirs, n_of(wl), max_bounces=max_bounces)
+        P, D = res["P"], res["D"]
+        dist = ray_point_distance(P, D, C)
+        col, row, valid = project(P)
+        good = res["exited"] & np.isfinite(dist) & valid
+        if not good.any():
+            continue
+        ci = np.clip(np.round(col[good]).astype(int), 0, bnx - 1)
+        ri = np.clip(np.round(row[good]).astype(int), 0, bny - 1)
+        cand = {"dirs": dirs[good], "wl": wl[good], "P": P[good], "D": D[good],
+                "dist": dist[good], "nint": res["nint"][good],
+                "n_refr": res["n_refr"][good], "n_refl": res["n_refl"][good],
+                "bin": ri * bnx + ci}
+        keep = _keep_best_per_bin(keep, cand, per_bin)
+
+    keep.pop("bin")
+    keep["exited"] = np.ones(keep["dist"].shape[0], dtype=bool)
+    return keep
+
+
 def save_pass1(path, samples, meta):
     np.savez_compressed(path, meta=np.array(json.dumps(meta)), **samples)
 
@@ -157,6 +229,7 @@ def camera_from_meta(meta):
     return (tuple(c[0]), tuple(c[1]), tuple(c[2]), c[3])
 
 
-__all__ = ["ray_point_distance", "build_gem", "sample_pass", "save_pass1",
-           "load_pass1", "connect_pass", "save_pass2", "load_pass2",
-           "render_from_pass2", "make_meta", "camera_from_meta"]
+__all__ = ["ray_point_distance", "build_gem", "sample_pass",
+           "sample_pass_streaming", "save_pass1", "load_pass1", "connect_pass",
+           "save_pass2", "load_pass2", "render_from_pass2", "make_meta",
+           "camera_from_meta"]
