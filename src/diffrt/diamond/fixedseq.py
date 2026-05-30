@@ -183,5 +183,61 @@ def connect_fixed_newton(facets, seq, origin, dirs, wl, n_of, dn_of, target,
     return {"P": r["P"], "D": r["D"], "wl": wl, "resid": dist, "hist": hist}
 
 
+def solve_fixed_2dof(facets, seq, origin, dirs, wl, n_of, dn_of, target,
+                     max_iter=30, tol=1e-9,
+                     fracs=(1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125)):
+    """Well-posed connection on a fixed chain: hold ``wl`` fixed, Newton-solve the
+    2-DOF emission direction (e1, e2) so the exit ray passes through ``target``,
+    with a per-iteration backtracking **line search** (each step takes the best
+    fraction along the Newton direction → no across-iteration alpha collapse).
+
+    Returns dict: converged (N,), P, D (N,3), wl (N,), resid (N,)."""
+    N = dirs.shape[0]
+    D = (dirs / np.linalg.norm(dirs, axis=1, keepdims=True)).copy()
+    wl = np.broadcast_to(wl, (N,)).astype(float).copy()
+    target = np.asarray(target, float)
+    O = np.broadcast_to(np.asarray(origin, float), (N, 3)).copy()
+
+    def trace(Dx):
+        return trace_fixed_sequence_vec(facets, seq, O, Dx, wl, n_of, dn_of)
+
+    def resid(r):
+        TP = target[None, :] - r["P"]
+        f = np.cross(TP, r["D"])
+        return TP, f, np.linalg.norm(f, axis=1)
+
+    r = trace(D)
+    TP, f, dist = resid(r)
+    for _ in range(max_iter):
+        Jf = np.stack([-np.cross(r["Pj"][:, :, k], r["D"]) + np.cross(TP, r["Dj"][:, :, k])
+                       for k in (0, 1)], axis=2)         # (N,3,2)
+        delta = -np.einsum('nij,nj->ni', np.linalg.pinv(Jf), f)    # (N,2), min-norm
+        delta = np.nan_to_num(delta)
+        e1, e2 = _make_frames(D)
+        step = delta[:, 0:1] * e1 + delta[:, 1:2] * e2
+
+        best_dist = dist.copy()
+        best_frac = np.zeros(N)
+        for fr in fracs:
+            Dp = D + fr * step
+            Dp /= np.linalg.norm(Dp, axis=1, keepdims=True)
+            _, _, dp = resid(trace(Dp))
+            better = dp < best_dist
+            best_dist = np.where(better, dp, best_dist)
+            best_frac = np.where(better, fr, best_frac)
+        if not (best_frac > 0).any():
+            break
+        Dn = D + best_frac[:, None] * step
+        Dn /= np.linalg.norm(Dn, axis=1, keepdims=True)
+        D = np.where((best_frac > 0)[:, None], Dn, D)
+        r = trace(D)
+        TP, f, dist = resid(r)
+        if (dist < tol).all():
+            break
+
+    return {"converged": dist < tol, "P": r["P"], "D": r["D"],
+            "wl": wl, "resid": dist}
+
+
 __all__ = ["trace_record_sequence", "trace_fixed_sequence_vec",
-           "connect_fixed_newton"]
+           "connect_fixed_newton", "solve_fixed_2dof"]
