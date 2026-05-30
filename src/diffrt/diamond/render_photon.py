@@ -79,6 +79,8 @@ def trace_beams_vec(gem, O, D0, n_glass, dn, n_outside=1.0, max_bounces=18):
 
     exited = np.zeros(N, dtype=bool)
     nint = np.zeros(N, dtype=int)
+    n_refr = np.zeros(N, dtype=int)
+    n_refl = np.zeros(N, dtype=int)
     alive = np.arange(N)
     facets = gem.facets
 
@@ -147,9 +149,12 @@ def trace_beams_vec(gem, O, D0, n_glass, dn, n_outside=1.0, max_bounces=18):
         Pj[ah] = Hjh + _NUDGE * newDj
         Dj[ah] = newDj
         nint[ah] += 1
+        n_refl[ah[tir]] += 1
+        n_refr[ah[~tir]] += 1
         alive = ah
 
-    return {"P": P, "D": D, "Pj": Pj, "Dj": Dj, "exited": exited}
+    return {"P": P, "D": D, "Pj": Pj, "Dj": Dj, "exited": exited,
+            "nint": nint, "n_refr": n_refr, "n_refl": n_refl}
 
 
 def _camera_projector(camera, W, H):
