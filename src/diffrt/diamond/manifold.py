@@ -23,39 +23,42 @@ from diffrt.diamond.render_photon import (_camera_projector, _make_frames,
                                           trace_beams_vec)
 
 
-def _eval(gem, Ct, D, lam, n_of, dn_of, L, max_bounces):
-    """Trace and return (res, residual rn, LP). rn = sin(miss to L), inf if not
-    exited."""
-    res = trace_beams_vec(gem, Ct, D, np.asarray(n_of(lam), float),
-                          np.asarray(dn_of(lam), float), max_bounces=max_bounces)
-    LP = L[None, :] - res["P"]
-    dist = np.maximum(np.linalg.norm(LP, axis=1), 1e-12)
-    rn = np.linalg.norm(np.cross(LP, res["D"]), axis=1) / dist
+def _eval(gem, Ot, D, wl, n_of, dn_of, target, max_bounces):
+    """Trace and return (res, residual rn, TP). rn = sin(miss to target), inf if
+    not exited. ``wl`` = wavelength (µm)."""
+    res = trace_beams_vec(gem, Ot, D, np.asarray(n_of(wl), float),
+                          np.asarray(dn_of(wl), float), max_bounces=max_bounces)
+    TP = target[None, :] - res["P"]
+    dist = np.maximum(np.linalg.norm(TP, axis=1), 1e-12)
+    rn = np.linalg.norm(np.cross(TP, res["D"]), axis=1) / dist
     rn = np.where(res["exited"], rn, np.inf)
-    return res, rn, LP
+    return res, rn, TP
 
 
-def connect_newton_vec(gem, C, dirs, lam, n_of, dn_of, L, max_iter=40,
+def connect_newton_vec(gem, origin, dirs, wl, n_of, dn_of, target, max_iter=40,
                        tol=1e-6, max_bounces=18, band=(0.40, 0.70),
                        seed_resid=0.15, a_min=1e-3):
-    """Project (direction, λ) seeds onto the 1-DOF connecting manifold.
+    """Project (direction, wavelength) seeds onto the 1-DOF connecting manifold.
 
-    Gauss–Newton with backtracking: the connection constraint
-    ``f = (L − P) × D = 0`` is solved over the 3 DOF (e1, e2, λ) via a min-norm
-    (pseudo-inverse) step. Because a raw step can jump the ray onto different
-    facets (path-topology change) the step is **line-searched**: tried, re-traced,
-    accepted only if the actual residual drops, else the per-seed step scale is
-    halved. Only seeds already within ``seed_resid`` are pursued.
+    Generic: rays leave ``origin`` and we steer them to pass through ``target``
+    (camera-side: origin=camera, target=light; light-side: origin=light,
+    target=camera). Gauss–Newton with backtracking on the constraint
+    ``f = (target − P) × D = 0``, solved over **all 3 DOF** (e1, e2, wl) via a
+    min-norm (pseudo-inverse) step — never freezing two and sweeping one. A raw
+    step can jump the ray onto different facets (path-topology change), so the
+    step is line-searched: tried, re-traced, accepted only if the actual residual
+    drops, else the per-seed step scale is halved. Only seeds within
+    ``seed_resid`` are pursued.
 
-    Returns dict: converged (N,), P, D (N,3), resid (N,), iters (N,).
+    Returns dict: converged (N,), P, D (N,3), wl (N,), resid (N,), iters (N,).
     """
     N = dirs.shape[0]
     D = (dirs / np.linalg.norm(dirs, axis=1, keepdims=True)).copy()
-    lam = np.broadcast_to(lam, (N,)).astype(float).copy()
-    L = np.asarray(L, float)
-    Ct = np.broadcast_to(np.asarray(C, float), (N, 3)).copy()
+    wl = np.broadcast_to(wl, (N,)).astype(float).copy()
+    target = np.asarray(target, float)
+    Ot = np.broadcast_to(np.asarray(origin, float), (N, 3)).copy()
 
-    res, rn, LP = _eval(gem, Ct, D, lam, n_of, dn_of, L, max_bounces)
+    res, rn, TP = _eval(gem, Ot, D, wl, n_of, dn_of, target, max_bounces)
     P, Dd, Pj, Dj = res["P"], res["D"], res["Pj"], res["Dj"]
     converged = np.zeros(N, bool)
     iters = np.zeros(N, int)
@@ -66,10 +69,10 @@ def connect_newton_vec(gem, C, dirs, lam, n_of, dn_of, L, max_iter=40,
         if active.size == 0:
             break
         a = active
-        fa = np.cross(LP[a], Dd[a])
+        fa = np.cross(TP[a], Dd[a])
         Jf = np.empty((a.size, 3, 3))
         for k in range(3):
-            Jf[:, :, k] = -np.cross(Pj[a, :, k], Dd[a]) + np.cross(LP[a], Dj[a, :, k])
+            Jf[:, :, k] = -np.cross(Pj[a, :, k], Dd[a]) + np.cross(TP[a], Dj[a, :, k])
         step = -np.einsum('nij,nj->ni', np.linalg.pinv(Jf), fa)   # min-norm
 
         ang = step[:, :2] * alpha[a, None]
@@ -77,13 +80,13 @@ def connect_newton_vec(gem, C, dirs, lam, n_of, dn_of, L, max_iter=40,
         e1, e2 = _make_frames(D[a])
         Dp = D[a] + ang[:, 0:1] * e1 + ang[:, 1:2] * e2
         Dp /= np.linalg.norm(Dp, axis=1, keepdims=True)
-        lamp = np.clip(lam[a] + dl, band[0], band[1])
+        wlp = np.clip(wl[a] + dl, band[0], band[1])
 
-        rp, rnp, LPp = _eval(gem, Ct[a], Dp, lamp, n_of, dn_of, L, max_bounces)
+        rp, rnp, TPp = _eval(gem, Ot[a], Dp, wlp, n_of, dn_of, target, max_bounces)
         better = rnp < rn[a]
         ia = np.where(better)[0]
         aa = a[ia]
-        D[aa], lam[aa], rn[aa], LP[aa] = Dp[ia], lamp[ia], rnp[ia], LPp[ia]
+        D[aa], wl[aa], rn[aa], TP[aa] = Dp[ia], wlp[ia], rnp[ia], TPp[ia]
         P[aa], Dd[aa] = rp["P"][ia], rp["D"][ia]
         Pj[aa], Dj[aa] = rp["Pj"][ia], rp["Dj"][ia]
         alpha[aa] = np.minimum(alpha[aa] * 1.5, 4.0)
@@ -95,7 +98,8 @@ def connect_newton_vec(gem, C, dirs, lam, n_of, dn_of, L, max_iter=40,
         cont = (~conv_now) & (alpha[a] >= a_min)
         active = a[np.where(cont)[0]]
 
-    return {"converged": converged, "P": P, "D": Dd, "resid": rn, "iters": iters}
+    return {"converged": converged, "P": P, "D": Dd, "wl": wl,
+            "resid": rn, "iters": iters}
 
 
 def render_fire_manifold(gem, camera, light_pos, n_of, dn_of, width, height,
