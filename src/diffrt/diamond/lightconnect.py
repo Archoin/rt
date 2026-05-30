@@ -1,45 +1,55 @@
-"""Light-side sample-and-connect for diamond fire (MC-1, take 2).
+"""Light-side sample-and-connect for diamond fire — staged & replayable.
 
-Two passes:
-  Pass 1 (sample): emit many rays from the point light through the diamond,
-    measure each exit ray's perpendicular distance to the camera pinhole, sort.
-  Pass 2 (MC connect): Newton-refine the top-K closest seeds (origin=light,
-    target=camera, tuning e1,e2,wl) to minimize that distance; accept seeds whose
-    final distance < accept_eps, reject the rest; splat accepted connections onto
-    the film coloured by their wavelength wl.
+Three decoupled stages, each cacheable to disk so it can be re-run without
+repeating the expensive ones:
 
-Seeding from the light's closest rays puts the Newton solver inside connecting
-facet topologies, which is what the camera-side pixel-grid seeding lacked.
+  1. sample_pass  : emit rays from the light (central-only tracer → memory-light),
+                    measure each exit ray's distance to the camera pinhole.
+                    -> save_pass1 / load_pass1
+  2. connect_pass : Newton-refine the top-K closest seeds (origin=light,
+                    target=camera); pluggable ``solver``. -> save_pass2 / load_pass2
+  3. render       : render_from_pass2 thresholds by ``accept_eps`` and splats —
+                    so a new image at a different accept_eps needs no recompute.
 
 ``wl`` denotes wavelength (µm) throughout.
 """
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
+from diffrt.diamond.geometry import round_brilliant
 from diffrt.diamond.manifold import connect_newton_vec
 from diffrt.diamond.render import wavelength_to_rgb
 from diffrt.diamond.render_photon import (_camera_projector, _sample_cone,
-                                          trace_beams_vec)
+                                          trace_rays_vec, trace_beams_vec)
 
 
 def ray_point_distance(P, D, C):
     """Perpendicular distance from point ``C`` to rays ``(P, D)`` (D unit).
-
-    Returns ``inf`` where ``C`` is behind the ray (front check)."""
+    ``inf`` where ``C`` is behind the ray (front check)."""
     v = np.asarray(C, float)[None, :] - P
     along = np.sum(v * D, axis=1)
     perp = v - along[:, None] * D
-    dist = np.linalg.norm(perp, axis=1)
-    return np.where(along > 0.0, dist, np.inf)
+    return np.where(along > 0.0, np.linalg.norm(perp, axis=1), np.inf)
 
 
-def sample_pass(gem, light_pos, camera_C, n_of, dn_of, n_samples, band,
+def build_gem(meta):
+    """Rebuild the gem from stored metadata."""
+    return round_brilliant(crown_angle_deg=meta["crown_angle_deg"],
+                           pavilion_angle_deg=meta["pavilion_angle_deg"],
+                           table_frac=meta["table_frac"])
+
+
+# --- stage 1: sample -------------------------------------------------------
+
+def sample_pass(gem, light_pos, camera_C, n_of, n_samples, band,
                 gem_radius=1.3, max_bounces=18, seed=0):
-    """Emit rays from the light, trace, return per-ray distance-to-camera + sort.
+    """Emit rays from the light (central-only), return per-ray exit + distance.
 
-    Returns dict: dirs (N,3), wl (N,), P (N,3), D (N,3), dist (N,), order (N,)."""
+    Returns dict: dirs, wl, P, D, dist, exited, nint, n_refr, n_refl."""
     rng = np.random.default_rng(seed)
     L = np.asarray(light_pos, float)
     axis = -L                                            # aim at the gem (~origin)
@@ -48,60 +58,105 @@ def sample_pass(gem, light_pos, camera_C, n_of, dn_of, n_samples, band,
     dirs = _sample_cone(axis, cone_half, n_samples, rng)
     wl = rng.uniform(band[0], band[1], n_samples)
     O = np.broadcast_to(L, dirs.shape).copy()
-    res = trace_beams_vec(gem, O, dirs, n_of(wl), dn_of(wl),
-                          max_bounces=max_bounces)
-    P, D, ex = res["P"], res["D"], res["exited"]
-    dist = ray_point_distance(P, D, camera_C)
-    dist = np.where(ex, dist, np.inf)
-    order = np.argsort(dist)
-    return {"dirs": dirs, "wl": wl, "P": P, "D": D, "dist": dist, "order": order}
+    res = trace_rays_vec(gem, O, dirs, n_of(wl), max_bounces=max_bounces)
+    dist = np.where(res["exited"], ray_point_distance(res["P"], res["D"], camera_C),
+                    np.inf)
+    return {"dirs": dirs, "wl": wl, "P": res["P"], "D": res["D"], "dist": dist,
+            "exited": res["exited"], "nint": res["nint"],
+            "n_refr": res["n_refr"], "n_refl": res["n_refl"]}
 
 
-def render_fire_connect(gem, camera, light_pos, n_of, dn_of, width, height,
-                        n_samples=800_000, top_k=80_000, accept_eps=0.03,
-                        band=(0.40, 0.70), newton_iters=40, max_bounces=18,
-                        gem_radius=1.3, seed=0):
-    """Render diamond fire by light-side sample → sort → Newton-connect → splat.
+def save_pass1(path, samples, meta):
+    np.savez_compressed(path, meta=np.array(json.dumps(meta)), **samples)
 
-    Returns (img (H,W,3) linear RGB, stats)."""
-    C, project = _camera_projector(camera, width, height)
+
+def load_pass1(path):
+    d = np.load(path, allow_pickle=False)
+    meta = json.loads(str(d["meta"]))
+    samples = {k: d[k] for k in d.files if k != "meta"}
+    return samples, meta
+
+
+# --- stage 2: connect ------------------------------------------------------
+
+def connect_pass(gem, light_pos, camera_C, samples, n_of, dn_of, top_k=100_000,
+                 newton_iters=50, max_bounces=18, band=(0.40, 0.70),
+                 seed_resid=10.0, solver=connect_newton_vec):
+    """Newton-refine the top-K closest seeds. ``solver`` is pluggable: any
+    callable ``(gem, origin, dirs, wl, n_of, dn_of, target, ...) -> {P,D,wl}``.
+
+    Returns dict: seed_idx (into samples), P, D, wl, dist (final, to the camera)."""
     L = np.asarray(light_pos, float)
+    order = np.argsort(samples["dist"])
+    top = order[:top_k]
+    top = top[np.isfinite(samples["dist"][top])]
 
-    sp = sample_pass(gem, L, C, n_of, dn_of, n_samples, band,
-                     gem_radius=gem_radius, max_bounces=max_bounces, seed=seed)
+    res = solver(gem, L, samples["dirs"][top], samples["wl"][top], n_of, dn_of,
+                 camera_C, max_iter=newton_iters, tol=1e-7,
+                 max_bounces=max_bounces, band=band, seed_resid=seed_resid)
+    final_dist = ray_point_distance(res["P"], res["D"], camera_C)
+    return {"seed_idx": top, "P": res["P"], "D": res["D"], "wl": res["wl"],
+            "dist": final_dist, "seed_dist": samples["dist"][top]}
 
-    # top-K closest finite seeds
-    top = sp["order"][:top_k]
-    top = top[np.isfinite(sp["dist"][top])]
 
-    res = connect_newton_vec(gem, L, sp["dirs"][top], sp["wl"][top], n_of, dn_of,
-                             C, max_iter=newton_iters, tol=1e-7,
-                             max_bounces=max_bounces, band=band, seed_resid=10.0)
-    final_dist = ray_point_distance(res["P"], res["D"], C)
-    accept = final_dist < accept_eps
+def save_pass2(path, pass2, meta):
+    np.savez_compressed(path, meta=np.array(json.dumps(meta)), **pass2)
 
+
+def load_pass2(path):
+    d = np.load(path, allow_pickle=False)
+    meta = json.loads(str(d["meta"]))
+    pass2 = {k: d[k] for k in d.files if k != "meta"}
+    return pass2, meta
+
+
+# --- stage 3: render -------------------------------------------------------
+
+def render_from_pass2(pass2, camera, width, height, accept_eps):
+    """Threshold connections by ``accept_eps`` and splat → (img, n_accepted).
+
+    Cheap: no tracing. Re-run with any accept_eps to re-render from a cached
+    pass2."""
+    _C, project = _camera_projector(camera, width, height)
+    accept = pass2["dist"] < accept_eps
     img = np.zeros((height * width, 3))
+    n = 0
     if accept.any():
-        Pa, wla = res["P"][accept], res["wl"][accept]
-        col, row, valid = project(Pa)
+        col, row, valid = project(pass2["P"][accept])
         ci = np.round(col[valid]).astype(int)
         ri = np.round(row[valid]).astype(int)
-        idx = ri * width + ci
-        rgb = np.array([wavelength_to_rgb(w * 1000.0) for w in wla[valid]])
-        np.add.at(img, idx, rgb)
+        rgb = np.array([wavelength_to_rgb(w * 1000.0)
+                        for w in pass2["wl"][accept][valid]])
+        np.add.at(img, ri * width + ci, rgb)
+        n = int(valid.sum())
+    return img.reshape(height, width, 3), n
 
-    fd = final_dist[np.isfinite(final_dist)]
-    stats = {
-        "n_samples": n_samples,
-        "n_exited": int(np.isfinite(sp["dist"]).sum()),
-        "seeds_refined": int(top.size),
-        "n_accepted": int(accept.sum()),
-        "accept_rate": float(accept.mean()) if top.size else 0.0,
-        "seed_min_dist": float(sp["dist"][sp["order"][0]]),
-        "final_min_dist": float(fd.min()) if fd.size else float("inf"),
-        "final_median_dist": float(np.median(fd)) if fd.size else float("inf"),
+
+# --- orchestrator ----------------------------------------------------------
+
+def make_meta(light_pos, camera, band, max_bounces, crown_angle_deg,
+              pavilion_angle_deg, table_frac, material, n_samples, seed,
+              gem_radius, width, height):
+    return {
+        "light_pos": list(map(float, light_pos)),
+        "camera": [list(map(float, camera[0])), list(map(float, camera[1])),
+                   list(map(float, camera[2])), float(camera[3])],
+        "band": [float(band[0]), float(band[1])],
+        "max_bounces": int(max_bounces),
+        "crown_angle_deg": float(crown_angle_deg),
+        "pavilion_angle_deg": float(pavilion_angle_deg),
+        "table_frac": float(table_frac),
+        "material": str(material), "n_samples": int(n_samples),
+        "seed": int(seed), "gem_radius": float(gem_radius),
+        "width": int(width), "height": int(height),
     }
-    return img.reshape(height, width, 3), stats
 
 
-__all__ = ["ray_point_distance", "sample_pass", "render_fire_connect"]
+def camera_from_meta(meta):
+    c = meta["camera"]
+    return (tuple(c[0]), tuple(c[1]), tuple(c[2]), c[3])
+
+
+__all__ = ["ray_point_distance", "build_gem", "sample_pass", "save_pass1",
+           "load_pass1", "connect_pass", "save_pass2", "load_pass2",
+           "render_from_pass2", "make_meta", "camera_from_meta"]

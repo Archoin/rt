@@ -157,6 +157,64 @@ def trace_beams_vec(gem, O, D0, n_glass, dn, n_outside=1.0, max_bounces=18):
             "nint": nint, "n_refr": n_refr, "n_refl": n_refl}
 
 
+def trace_rays_vec(gem, O, D0, n_glass, n_outside=1.0, max_bounces=18):
+    """Central-ray-only batched tracer — **no Jacobian**, memory-light.
+
+    Same specular chain as ``trace_beams_vec`` (transmit / reflect on TIR) but
+    carries only position and direction, so the sample pass can use far more
+    rays. Returns P, D (N,3), exited, nint, n_refr, n_refl (N,).
+    """
+    N = O.shape[0]
+    D = D0 / np.linalg.norm(D0, axis=1, keepdims=True)
+    P = O.copy()
+    n_glass = np.broadcast_to(np.asarray(n_glass, float), (N,)).copy()
+    exited = np.zeros(N, dtype=bool)
+    nint = np.zeros(N, dtype=int)
+    n_refr = np.zeros(N, dtype=int)
+    n_refl = np.zeros(N, dtype=int)
+    alive = np.arange(N)
+    facets = gem.facets
+
+    for _ in range(max_bounces):
+        if alive.size == 0:
+            break
+        Pa, Da = P[alive], D[alive]
+        t, nrm, _p0, found = _nearest_hit_vec(facets, Pa, Da)
+        miss = ~found
+        if miss.any():
+            am = alive[miss]
+            exited[am] = nint[am] > 0
+        hit = found
+        if not hit.any():
+            break
+        ah = alive[hit]
+        Ph, Dh, nh, th = Pa[hit], Da[hit], nrm[hit], t[hit]
+        ng = n_glass[ah]
+
+        Hh = Ph + th[:, None] * Dh
+        entering = np.sum(Dh * nh, axis=1) < 0.0
+        nface = np.where(entering[:, None], nh, -nh)
+        eta = np.where(entering, n_outside / ng, ng / n_outside)
+        c_i = -np.sum(Dh * nface, axis=1)
+        k = eta * eta * (1.0 - c_i * c_i)
+        tir = k > 1.0
+        c_t = np.sqrt(np.clip(1.0 - k, 0.0, None))
+        Dref = eta[:, None] * Dh + (eta * c_i - c_t)[:, None] * nface
+        Drfl = Dh + 2.0 * c_i[:, None] * nface
+        newD = np.where(tir[:, None], Drfl, Dref)
+        newD /= np.linalg.norm(newD, axis=1, keepdims=True)
+
+        P[ah] = Hh + _NUDGE * newD
+        D[ah] = newD
+        nint[ah] += 1
+        n_refl[ah[tir]] += 1
+        n_refr[ah[~tir]] += 1
+        alive = ah
+
+    return {"P": P, "D": D, "exited": exited,
+            "nint": nint, "n_refr": n_refr, "n_refl": n_refl}
+
+
 def _camera_projector(camera, W, H):
     """Return (C, project) where project(X (M,3)) -> (col, row, valid)."""
     C = np.asarray(camera[0], float)
@@ -260,5 +318,5 @@ def render_fire_photon(gem, camera, light_pos, n_of, dn_of, width, height,
     return img.reshape(height, width, 3), lit
 
 
-__all__ = ["trace_beams_vec", "render_fire_photon"]
+__all__ = ["trace_beams_vec", "trace_rays_vec", "render_fire_photon"]
 
