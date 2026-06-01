@@ -320,5 +320,117 @@ def render_fire_photon(gem, camera, light_pos, n_of, dn_of, width, height,
     return img.reshape(height, width, 3), lit
 
 
-__all__ = ["trace_beams_vec", "trace_rays_vec", "render_fire_photon"]
+def _projection_jacobian(project, P, eps=1e-4):
+    """Central-difference Jacobian d(col,row)/dP of the camera projection.
+
+    Returns (N,2,3). project()'s returned (col,row) are the raw projected
+    coordinates (the in-frame clamp only affects its `valid` flag), so a tiny
+    central difference about an in-front P is accurate.
+    """
+    n = P.shape[0]
+    J = np.zeros((n, 2, 3))
+    for k in range(3):
+        e = np.zeros(3); e[k] = eps
+        cp, rp, _ = project(P + e)
+        cm, rm, _ = project(P - e)
+        J[:, 0, k] = (cp - cm) / (2.0 * eps)
+        J[:, 1, k] = (rp - rm) / (2.0 * eps)
+    return J
+
+
+def render_fire_differential(gem, camera, light_pos, n_of, dn_of, width, height,
+                             band=(0.40, 0.70), n_samples=2_000_000, batches=8,
+                             aperture=0.10, gem_radius=1.3, max_bounces=18,
+                             min_foot=0.7, max_foot=4.0, win=13, seed=0):
+    """Light-traced fire via beam-differential footprint splatting (finite aperture).
+
+    Physically-correct replacement for the (measure-zero) point-light exact
+    connection. Photons are emitted from `light_pos` over the gem cone, traced
+    through the **bounded** gem (valid paths only). A photon contributes if its
+    exit ray crosses the lens plane within `aperture` of the camera centre `C`
+    (the finite aperture is what turns the measure-zero connection into positive
+    measure). The lens is focused on the gem, so the film point is `project(P)`;
+    each photon is splatted as a normalized Gaussian whose covariance is the beam
+    differential footprint `Σ = JJᵀ`, `J = (∂U/∂P)·∂P/∂(e1,e2)·Δ`, coloured by
+    wavelength. Dispersion (different wl → different exit ray → different U) fans
+    each glint into a rainbow streak — the fire.
+
+    Footprint is clamped to [`min_foot`, `max_foot`] px (regularize + uniform
+    shrink) and splatted on a `win`×`win` window. Returns (img (H,W,3),
+    n_accepted, aperture_distances (M,)).
+    """
+    rng = np.random.default_rng(seed)
+    C, project = _camera_projector(camera, width, height)
+    eye = np.asarray(camera[0], float)
+    fwd = normalize(np.asarray(camera[1], float) - eye)
+    L = np.asarray(light_pos, float)
+    axis = -L
+    cone = np.arctan(gem_radius / np.linalg.norm(axis))
+    Omega = 2.0 * np.pi * (1.0 - np.cos(cone))
+    Delta = np.sqrt(Omega / max(n_samples, 1))           # angular sample spacing (rad)
+
+    img = np.zeros((height * width, 3))
+    accepted = 0
+    dists = []
+    r = win // 2
+    offs = np.arange(-r, r + 1)
+    oy, ox = np.meshgrid(offs, offs, indexing="ij")
+    ox = ox.ravel(); oy = oy.ravel()                     # (win²,)
+    per = int(np.ceil(n_samples / batches))
+
+    for _ in range(batches):
+        d = _sample_cone(axis, cone, per, rng)
+        wl = rng.uniform(band[0], band[1], per)
+        O = np.broadcast_to(L, d.shape).copy()
+        res = trace_beams_vec(gem, O, d, n_of(wl), dn_of(wl), max_bounces=max_bounces)
+        ex = res["exited"]
+        if not ex.any():
+            continue
+        P, D, Pj, wle = res["P"][ex], res["D"][ex], res["Pj"][ex], wl[ex]
+
+        denom = D @ fwd
+        ok = np.abs(denom) > _EPS
+        tpl = np.where(ok, ((eye - P) @ fwd) / np.where(ok, denom, 1.0), -1.0)
+        Q = P + tpl[:, None] * D                         # lens-plane crossing
+        qd = np.linalg.norm(Q - C, axis=1)
+        passes = ok & (tpl > 0.0) & (qd < aperture)
+        if not passes.any():
+            continue
+        Pp, Pjp, wlp = P[passes], Pj[passes], wle[passes]
+
+        col, row, _ = project(Pp)
+        dUdP = _projection_jacobian(project, Pp)          # (n,2,3)
+        J = np.einsum("nij,njk->nik", dUdP, Pjp[:, :, :2]) * Delta   # (n,2,2) px
+        S = np.einsum("nik,njk->nij", J, J)              # J Jᵀ (n,2,2)
+        S[:, 0, 0] += min_foot ** 2
+        S[:, 1, 1] += min_foot ** 2
+        tr = S[:, 0, 0] + S[:, 1, 1]
+        det = S[:, 0, 0] * S[:, 1, 1] - S[:, 0, 1] ** 2
+        lmax = 0.5 * (tr + np.sqrt(np.clip(tr * tr - 4.0 * det, 0.0, None)))
+        S *= np.minimum(1.0, max_foot ** 2 / np.maximum(lmax, 1e-12))[:, None, None]
+        det = np.maximum(S[:, 0, 0] * S[:, 1, 1] - S[:, 0, 1] ** 2, 1e-12)
+        iS00, iS11, iS01 = S[:, 1, 1] / det, S[:, 0, 0] / det, -S[:, 0, 1] / det
+
+        ci0 = np.round(col).astype(int); ri0 = np.round(row).astype(int)
+        cc = ci0[:, None] + ox[None, :]; rr = ri0[:, None] + oy[None, :]   # (n,win²)
+        dx = cc - col[:, None]; dy = rr - row[:, None]
+        qf = iS00[:, None] * dx * dx + 2.0 * iS01[:, None] * dx * dy + iS11[:, None] * dy * dy
+        inb = (cc >= 0) & (cc < width) & (rr >= 0) & (rr < height)
+        wgt = np.where(inb, np.exp(-0.5 * qf), 0.0)
+        wsum = wgt.sum(axis=1, keepdims=True)
+        wgt = wgt / np.where(wsum > 0, wsum, 1.0)
+        rgb = np.array([wavelength_to_rgb(l * 1000.0) for l in wlp])       # (n,3)
+        contrib = wgt[:, :, None] * rgb[:, None, :]                        # (n,win²,3)
+        idx = rr * width + cc
+        np.add.at(img, idx[inb], contrib[inb])
+        accepted += int(passes.sum())
+        dists.append(qd[passes])
+
+    img /= max(n_samples, 1)
+    return (img.reshape(height, width, 3), accepted,
+            np.concatenate(dists) if dists else np.zeros(0))
+
+
+__all__ = ["trace_beams_vec", "trace_rays_vec", "render_fire_photon",
+           "render_fire_differential"]
 
